@@ -80,7 +80,7 @@ def extract_metrics(fred):
     val = fred.get('indicators', {}).get('realYields', {}).get('value')
     metrics.append(safe_get(lambda v=val: clean_numeric_string(v)))
     # 8. Leading Economic Index
-    val = fred.get('indicators', {}).get('lei', {}).get('change')
+    val = fred.get('indicators', {}).get('lei', {}).get('value')
     metrics.append(safe_get(lambda v=val: clean_numeric_string(v)))
     # 9. Market Valuation (P/E)
     val = fred.get('peRatio')
