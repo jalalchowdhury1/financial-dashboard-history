@@ -21,40 +21,94 @@ def extract_metrics(fred):
         except Exception:
             return "N/A"
 
+    def clean_numeric_string(text):
+        """Parse formatted strings like '9.55%', '6.5M', '123K' into clean float/int."""
+        import re
+        if not isinstance(text, str):
+            # Already a number, check if it's a whole number
+            try:
+                val = float(text)
+                if val == int(val):
+                    return int(val)
+                return round(val, 2)
+            except (ValueError, TypeError):
+                return "N/A"
+        
+        text = text.strip()
+        
+        # Detect shorthand multipliers
+        multiplier = 1
+        if 'M' in text.upper():
+            multiplier = 1_000_000
+            text = re.sub(r'[Mm]', '', text)
+        elif 'K' in text.upper():
+            multiplier = 1_000
+            text = re.sub(r'[Kk]', '', text)
+        
+        # Strip all non-numeric characters except decimal point and negative sign
+        cleaned = re.sub(r'[^\d.\-]', '', text)
+        
+        try:
+            value = float(cleaned)
+            value = value * multiplier
+            # Return int if whole number, else round to 2 decimals
+            if value == int(value):
+                return int(value)
+            return round(value, 2)
+        except (ValueError, TypeError):
+            return "N/A"
+
     # 1. Yield Curve (10Y-2Y)
-    metrics.append(safe_get(lambda: float(fred['yieldCurve']['current'])))
+    val = fred.get('yieldCurve', {}).get('current')
+    metrics.append(safe_get(lambda v=val: clean_numeric_string(v)))
     # 2. Profit Margin
-    metrics.append(safe_get(lambda: float(fred['profitMargin']['current'])))
+    val = fred.get('profitMargin', {}).get('current')
+    metrics.append(safe_get(lambda v=val: clean_numeric_string(v)))
     # 3. Sahm Rule
-    metrics.append(safe_get(lambda: float(fred['indicators']['sahmRule']['value'])))
+    val = fred.get('indicators', {}).get('sahmRule', {}).get('value')
+    metrics.append(safe_get(lambda v=val: clean_numeric_string(v)))
     # 4. Consumer Sentiment
-    metrics.append(safe_get(lambda: float(fred['indicators']['sentiment']['value'])))
-    # 5. Initial Claims (4wk)
-    metrics.append(safe_get(lambda: int(float(fred['indicators']['claims']['value']) * 1000)))
+    val = fred.get('indicators', {}).get('sentiment', {}).get('value')
+    metrics.append(safe_get(lambda v=val: clean_numeric_string(v)))
+    # 5. Initial Claims (4wk) - value is already in thousands (e.g., 215 = 215K)
+    val = fred.get('indicators', {}).get('claims', {}).get('value')
+    metrics.append(safe_get(lambda v=val: clean_numeric_string(v)))
     # 6. BBB Credit Spread
-    metrics.append(safe_get(lambda: float(fred['indicators']['creditSpread']['value'])))
+    val = fred.get('indicators', {}).get('creditSpread', {}).get('value')
+    metrics.append(safe_get(lambda v=val: clean_numeric_string(v)))
     # 7. Real Yields (10Y TIPS)
-    metrics.append(safe_get(lambda: float(fred['indicators']['realYields']['value'])))
+    val = fred.get('indicators', {}).get('realYields', {}).get('value')
+    metrics.append(safe_get(lambda v=val: clean_numeric_string(v)))
     # 8. Leading Economic Index
-    metrics.append(safe_get(lambda: float(fred['indicators']['lei']['value'])))
+    val = fred.get('indicators', {}).get('lei', {}).get('change')
+    metrics.append(safe_get(lambda v=val: clean_numeric_string(v)))
     # 9. Market Valuation (P/E)
-    metrics.append(safe_get(lambda: float(fred['peRatio'])))
+    val = fred.get('peRatio')
+    metrics.append(safe_get(lambda v=val: clean_numeric_string(v)))
     # 10. System Tightness
-    metrics.append(safe_get(lambda: float(fred['checklist']['nfci']['value'])))
+    val = fred.get('checklist', {}).get('nfci', {}).get('value')
+    metrics.append(safe_get(lambda v=val: clean_numeric_string(v)))
     # 11. M2 Money Supply
-    metrics.append(safe_get(lambda: float(fred['checklist']['m2']['value'])))
+    val = fred.get('checklist', {}).get('m2', {}).get('value')
+    metrics.append(safe_get(lambda v=val: clean_numeric_string(v)))
     # 12. Retail Sales (3mo)
-    metrics.append(safe_get(lambda: float(fred['checklist']['retail']['value'])))
-    # 13. Housing Starts
-    metrics.append(safe_get(lambda: int(float(fred['checklist']['housing']['value']) * 1000)))
+    val = fred.get('checklist', {}).get('retail', {}).get('value')
+    metrics.append(safe_get(lambda v=val: clean_numeric_string(v)))
+    # 13. Housing Starts - value is already in thousands
+    val = fred.get('checklist', {}).get('housing', {}).get('value')
+    metrics.append(safe_get(lambda v=val: clean_numeric_string(v)))
     # 14. Industrial Production
-    metrics.append(safe_get(lambda: float(fred['checklist']['indpro']['value'])))
-    # 15. Job Openings (JOLTS)
-    metrics.append(safe_get(lambda: int(float(fred['checklist']['jolts']['value']) * 1000)))
+    val = fred.get('checklist', {}).get('indpro', {}).get('value')
+    metrics.append(safe_get(lambda v=val: clean_numeric_string(v)))
+    # 15. Job Openings (JOLTS) - value is already in thousands (e.g., 6946 = 6.946M)
+    val = fred.get('checklist', {}).get('jolts', {}).get('value')
+    metrics.append(safe_get(lambda v=val: clean_numeric_string(v)))
     # 16. Durable Goods Orders
-    metrics.append(safe_get(lambda: float(fred['checklist']['durable']['value'])))
+    val = fred.get('checklist', {}).get('durable', {}).get('value')
+    metrics.append(safe_get(lambda v=val: clean_numeric_string(v)))
     # 17. Savings Rate
-    metrics.append(safe_get(lambda: float(fred['checklist']['savings']['value'])))
+    val = fred.get('checklist', {}).get('savings', {}).get('value')
+    metrics.append(safe_get(lambda v=val: clean_numeric_string(v)))
 
     return metrics
 
