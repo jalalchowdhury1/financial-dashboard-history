@@ -12,7 +12,13 @@ def get_fred_data():
     resp.raise_for_status()
     return resp.json()
 
-def extract_metrics(fred):
+def get_market_extra_data():
+    url = "https://financial-telegram-bot-beryl.vercel.app/api/market-extra"
+    resp = requests.get(url, timeout=15)
+    resp.raise_for_status()
+    return resp.json()
+
+def extract_metrics(fred, market_extra):
     metrics = []
     
     def safe_get(p_func):
@@ -110,6 +116,56 @@ def extract_metrics(fred):
     val = fred.get('checklist', {}).get('savings', {}).get('value')
     metrics.append(safe_get(lambda v=val: clean_numeric_string(v)))
 
+    # --- NEW METRICS FROM MARKET-EXTRA ---
+    market_extra = market_extra or {}
+    realEstate = market_extra.get('realEstate') or {}
+    rates = market_extra.get('rates') or {}
+    fx = market_extra.get('fx') or {}
+    commodities = market_extra.get('commodities') or {}
+
+    # 18. ZRI US Median Monthly Rent
+    val = (realEstate.get('rentIndex') or {}).get('current')
+    metrics.append(safe_get(lambda v=val: clean_numeric_string(v)))
+    # 19. MTGPMT Estimated Monthly Mortgage
+    val = (realEstate.get('mortgagePayment') or {}).get('current')
+    metrics.append(safe_get(lambda v=val: clean_numeric_string(v)))
+    # 20. MORT30 30-Year Fixed Mortgage Rate
+    val = (rates.get('mortgageRate') or {}).get('current')
+    metrics.append(safe_get(lambda v=val: clean_numeric_string(v)))
+    # 21. TNX 10-Year Treasury Yield
+    val = (rates.get('tnx') or {}).get('current')
+    metrics.append(safe_get(lambda v=val: clean_numeric_string(v)))
+    # 22. T2Y 2-Year Treasury Yield
+    val = (rates.get('t2y') or {}).get('current')
+    metrics.append(safe_get(lambda v=val: clean_numeric_string(v)))
+    # 23. DXY US Dollar Index
+    val = (fx.get('dxy') or {}).get('current')
+    metrics.append(safe_get(lambda v=val: clean_numeric_string(v)))
+    # 24. CL Crude Oil WTI
+    val = (commodities.get('cl') or {}).get('current')
+    metrics.append(safe_get(lambda v=val: clean_numeric_string(v)))
+    # 25. USD/CAD
+    val = (fx.get('usdcad') or {}).get('current')
+    metrics.append(safe_get(lambda v=val: clean_numeric_string(v)))
+    # 26. USD/INR
+    val = (fx.get('usdinr') or {}).get('current')
+    metrics.append(safe_get(lambda v=val: clean_numeric_string(v)))
+    # 27. USD/BDT
+    val = (fx.get('usdbdt') or {}).get('current')
+    metrics.append(safe_get(lambda v=val: clean_numeric_string(v)))
+    # 28. INR/BDT
+    val = (fx.get('inrbdt') or {}).get('current')
+    metrics.append(safe_get(lambda v=val: clean_numeric_string(v)))
+    # 29. CAD/INR
+    val = (fx.get('cadinr') or {}).get('current')
+    metrics.append(safe_get(lambda v=val: clean_numeric_string(v)))
+    # 30. GOLD
+    val = (commodities.get('gc') or {}).get('current')
+    metrics.append(safe_get(lambda v=val: clean_numeric_string(v)))
+    # 31. BTC
+    val = (commodities.get('btc') or {}).get('current')
+    metrics.append(safe_get(lambda v=val: clean_numeric_string(v)))
+
     return metrics
 
 def authenticate_gspread():
@@ -129,7 +185,8 @@ def authenticate_gspread():
 def main():
     try:
         fred = get_fred_data()
-        metrics = extract_metrics(fred)
+        market_extra = get_market_extra_data()
+        metrics = extract_metrics(fred, market_extra)
         
         gc = authenticate_gspread()
         sheet_id = "1lA-_yjLMc3qDTt9sogSPQrCohNULIk5wwJYfb5wIHfc"
