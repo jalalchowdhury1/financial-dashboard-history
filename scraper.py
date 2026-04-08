@@ -1,22 +1,34 @@
 import os
 import json
+import time
 import traceback
 from datetime import datetime
 import requests
 import gspread
 from google.oauth2.service_account import Credentials
 
+def fetch_with_retry(url, max_retries=3, base_delay=5):
+    """Fetch URL with exponential backoff retry logic."""
+    for attempt in range(max_retries):
+        try:
+            resp = requests.get(url, timeout=60)
+            resp.raise_for_status()
+            return resp.json()
+        except requests.exceptions.RequestException as e:
+            if attempt == max_retries - 1:
+                raise
+            delay = base_delay * (2 ** attempt)
+            print(f"Request failed (attempt {attempt + 1}/{max_retries}): {e}")
+            print(f"Retrying in {delay} seconds...")
+            time.sleep(delay)
+
 def get_fred_data():
     url = "https://financial-telegram-bot-beryl.vercel.app/api/fred"
-    resp = requests.get(url, timeout=15)
-    resp.raise_for_status()
-    return resp.json()
+    return fetch_with_retry(url)
 
 def get_market_extra_data():
     url = "https://financial-telegram-bot-beryl.vercel.app/api/market-extra"
-    resp = requests.get(url, timeout=15)
-    resp.raise_for_status()
-    return resp.json()
+    return fetch_with_retry(url)
 
 def extract_metrics(fred, market_extra):
     metrics = []
