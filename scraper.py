@@ -30,7 +30,19 @@ def get_market_extra_data():
     url = "https://financial-telegram-bot-beryl.vercel.app/api/market-extra"
     return fetch_with_retry(url)
 
-def extract_metrics(fred, market_extra):
+def get_sheets_data():
+    """Auxiliary 'frontrunner card' data (AAII DIFF, VIX). NON-FATAL by design:
+    returns {} on any failure so the core economic history (fred + market-extra)
+    is never blocked by an outage on this secondary endpoint. The affected
+    metrics simply fall back to "N/A" for that run."""
+    url = "https://financial-telegram-bot-beryl.vercel.app/api/sheets"
+    try:
+        return fetch_with_retry(url)
+    except Exception as e:
+        print(f"WARN: /api/sheets fetch failed; AAII/VIX columns will be N/A this run: {e}")
+        return {}
+
+def extract_metrics(fred, market_extra, sheets=None):
     metrics = []
     
     def safe_get(p_func):
@@ -178,6 +190,39 @@ def extract_metrics(fred, market_extra):
     val = (commodities.get('btc') or {}).get('current')
     metrics.append(safe_get(lambda v=val: clean_numeric_string(v)))
 
+    # --- NEW METRICS (appended at the end to preserve all existing column
+    #     positions and historical data; never insert/reorder earlier columns).
+    #     Note: LEI (col I) is intentionally LEFT in place — the /api/fred source
+    #     dropped it, so it now reads "N/A" going forward while its history stays.
+
+    # 32. Copper/Gold Ratio (replaced LEI on the dashboard) - from /api/fred
+    val = fred.get('indicators', {}).get('copperGold', {}).get('value')
+    metrics.append(safe_get(lambda v=val: clean_numeric_string(v)))
+    # 33. ATNHPI US House Price Index (index level) - from /api/market-extra
+    val = (realEstate.get('atnhpi') or {}).get('current')
+    metrics.append(safe_get(lambda v=val: clean_numeric_string(v)))
+    # 34. CAD/BDT Canadian Dollar to Bangladeshi Taka - from /api/market-extra
+    val = (fx.get('cadbdt') or {}).get('current')
+    metrics.append(safe_get(lambda v=val: clean_numeric_string(v)))
+
+    # --- AAII DIFF + VIX come from the secondary /api/sheets endpoint ---
+    sheets = sheets if isinstance(sheets, dict) else {}
+    vix = sheets.get('VIX')
+    vix = vix if isinstance(vix, dict) else {}  # guard: a string VIX would crash .get()
+
+    # 35. AAII DIFF (e.g. "0.70%" -> 0.7) - from /api/sheets
+    val = sheets.get('AAIIDiff')
+    metrics.append(safe_get(lambda v=val: clean_numeric_string(v)))
+    # 36. VIX (Current) (e.g. "15.37" -> 15.37) - from /api/sheets
+    val = vix.get('current')
+    metrics.append(safe_get(lambda v=val: clean_numeric_string(v)))
+    # 37. VIX (3M) (e.g. "19.25" -> 19.25) - from /api/sheets
+    val = vix.get('threeMonth')
+    metrics.append(safe_get(lambda v=val: clean_numeric_string(v)))
+    # 38. VIX Fear/Greed (e.g. "GREED19") - text label kept verbatim, NOT numeric
+    val = vix.get('fearGreed')
+    metrics.append(val if isinstance(val, str) and val.strip() else "N/A")
+
     return metrics
 
 def authenticate_gspread():
@@ -198,7 +243,8 @@ def main():
     try:
         fred = get_fred_data()
         market_extra = get_market_extra_data()
-        metrics = extract_metrics(fred, market_extra)
+        sheets = get_sheets_data()  # non-fatal; {} on failure
+        metrics = extract_metrics(fred, market_extra, sheets)
         
         gc = authenticate_gspread()
         sheet_id = "1lA-_yjLMc3qDTt9sogSPQrCohNULIk5wwJYfb5wIHfc"

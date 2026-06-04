@@ -1,5 +1,18 @@
 # Master Blueprint - Automated Data Pipeline
 
+> **CURRENT LIVE SCHEMA — updated 2026-06-04**
+>
+> `scraper.py` appends one row per run to the Google Sheet (tab `Sheet1`), mapped **purely by column position** (row 1 is a header row). The sheet is **append-only by column**: existing columns are never reordered or deleted — new metrics are added at the far right so all historical data stays aligned.
+>
+> Sources: `/api/fred`, `/api/market-extra`, and (new) `/api/sheets` on `https://financial-telegram-bot-beryl.vercel.app`.
+>
+> **Columns A–AM (39 total):** A=Date, then B–R = 17 FRED/checklist indicators, S–AF = 14 market-extra (real-estate / rates / FX / commodities), AG–AM = 7 metrics added 2026-06-04.
+>
+> **2026-06-04 change set:**
+> - *Deleted on the dashboard:* **Leading Economic Index (LEI)** — the FRED source dropped the series. Column I is **intentionally kept** (history preserved) and now records `N/A` going forward. It is **not** removed, because removing it would shift every later column and misalign all past rows.
+> - *Added (cols AG–AM):* Copper/Gold Ratio (`fred.indicators.copperGold.value`, replaced LEI on the dashboard), ATNHPI US House Price Index level (`market-extra.realEstate.atnhpi.current`), CAD/BDT (`market-extra.fx.cadbdt.current`), AAII DIFF (`sheets.AAIIDiff`), VIX Current / 3M (`sheets.VIX.current` / `.threeMonth`), VIX Fear/Greed (`sheets.VIX.fearGreed`, stored verbatim as text e.g. `GREED19`).
+> - `/api/sheets` is fetched **non-fatally**: an outage there yields `N/A` for AG–AM only and never blocks the core FRED/market-extra history.
+
 ## Phase 1: Source Discovery & Resilient Extraction
 
 Task 1: System Inspection & Data API Validation

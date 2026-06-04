@@ -3,6 +3,13 @@
 ## Target Website
 `https://financial-telegram-bot-beryl.vercel.app/`
 
+> **CORRECTION (2026-06-04):** The original conclusion below was wrong. The dashboard **does** expose structured JSON APIs and the scraper reads them directly (no DOM scraping). The endpoints actually used are:
+> - `GET /api/fred` — FRED indicators, checklist, P/E, copperGold
+> - `GET /api/market-extra` — real estate, rates, FX, commodities
+> - `GET /api/sheets` — AAII DIFF + VIX cards (added 2026-06-04; fetched non-fatally)
+>
+> The `scrapling`/DOM approach was never needed. The stale findings below are retained for history only.
+
 ## Findings
 
 ### JSON API Check
