@@ -1,0 +1,10 @@
+# Service-account key — NEVER commit it (code reads GOOGLE_SHEETS_CREDS env, file is local-only)
+finance-dashboard-history-*.json
+*.json
+.env
+
+# Python
+__pycache__/
+*.pyc
+venv/
+.venv/
