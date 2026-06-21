@@ -351,6 +351,80 @@ def apply_fallbacks(metrics, last_known):
     return metrics, carried, retired
 
 
+def _is_na(v):
+    """True for values the dashboard would render as N/A (None or ''/'N/A' strings)."""
+    return v is None or (isinstance(v, str) and v.strip().upper() in ("", "N/A"))
+
+
+def build_lkg_pairs(fred, updated_at):
+    """Self-describing key->value snapshot of the dashboard's FRED tiles, for the
+    dashboard's LAST-RESORT fallback (read only when live FRED AND its /tmp
+    last-known-good are both gone). Values + asOf (+ status/bullish/label) only — NO
+    chart history. Metrics with null/'N/A' values are OMITTED. The key names are a
+    contract with the dashboard reader (financial-telegram-bot lib/sheetLkg.js):
+    DON'T rename keys without updating that module.
+
+    Built from the rich (already null-recovered) /api/fred dict, NOT from Sheet1's
+    flattened row, so it carries asOf/status the flat columns drop."""
+    fred = fred if isinstance(fred, dict) else {}
+    ind = fred.get("indicators")
+    ind = ind if isinstance(ind, dict) else {}
+    chk = fred.get("checklist")
+    chk = chk if isinstance(chk, dict) else {}
+
+    pairs = [["updated_at", updated_at]]
+    if not _is_na(fred.get("peRatio")):
+        pairs.append(["peRatio", fred.get("peRatio")])
+
+    for tag in ("yieldCurve", "profitMargin"):
+        obj = fred.get(tag)
+        obj = obj if isinstance(obj, dict) else {}
+        cur = cur_or_hist(obj)
+        if not _is_na(cur):
+            pairs.append([f"{tag}.current", cur])
+            if obj.get("asOf"):
+                pairs.append([f"{tag}.asOf", obj["asOf"]])
+
+    for k in ("sahmRule", "sentiment", "claims", "creditSpread", "realYields", "copperGold"):
+        m = ind.get(k)
+        m = m if isinstance(m, dict) else {}
+        if _is_na(m.get("value")):
+            continue
+        pairs.append([f"indicators.{k}.value", m["value"]])
+        if m.get("asOf"):
+            pairs.append([f"indicators.{k}.asOf", m["asOf"]])
+        if m.get("status"):
+            pairs.append([f"indicators.{k}.status", m["status"]])
+
+    for k in ("nfci", "m2", "retail", "housing", "indpro", "jolts", "durable", "savings"):
+        m = chk.get(k)
+        m = m if isinstance(m, dict) else {}
+        if _is_na(m.get("value")):
+            continue
+        pairs.append([f"checklist.{k}.value", m["value"]])
+        if m.get("asOf"):
+            pairs.append([f"checklist.{k}.asOf", m["asOf"]])
+        if m.get("status"):
+            pairs.append([f"checklist.{k}.status", m["status"]])
+        if isinstance(m.get("bullish"), bool):
+            pairs.append([f"checklist.{k}.bullish", "true" if m["bullish"] else "false"])
+        if m.get("label"):
+            pairs.append([f"checklist.{k}.label", m["label"]])
+
+    return pairs
+
+
+def write_helper_tab(doc, pairs, title="dashboard_lkg"):
+    """Get-or-create the helper worksheet, then clear + rewrite it. NEVER deletes the
+    tab (its gid is referenced by the dashboard's export URL), so the gid stays stable."""
+    try:
+        ws = doc.worksheet(title)
+    except gspread.WorksheetNotFound:
+        ws = doc.add_worksheet(title=title, rows=max(100, len(pairs) + 10), cols=2)
+    ws.clear()
+    ws.update(values=[["key", "value"]] + [[k, v] for k, v in pairs], range_name="A1")
+
+
 def authenticate_gspread():
     scopes = ["https://www.googleapis.com/auth/spreadsheets"]
     if os.getenv("GITHUB_ACTIONS"):
@@ -401,6 +475,16 @@ def main():
         sheet.append_row(row)
         print(f"Data successfully appended to Google Sheet. "
               f"({len(metrics)} metrics; carried_forward={len(carried)}, na_remaining={na_left})")
+
+        # Helper tab for the dashboard's last-resort fallback (see build_lkg_pairs).
+        # Non-fatal: a failure here must never break the core history append.
+        try:
+            updated_at = (fred.get("_meta", {}) or {}).get("fetchedAt") or datetime.now().isoformat()
+            pairs = build_lkg_pairs(fred, updated_at)
+            write_helper_tab(doc, pairs)
+            print(f"Helper tab 'dashboard_lkg' updated ({len(pairs)} rows).")
+        except Exception as e:
+            print(f"WARN: helper tab update failed (non-fatal): {e}")
 
     except Exception:
         tb = traceback.format_exc()

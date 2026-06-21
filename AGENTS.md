@@ -60,7 +60,30 @@ GitHub Actions cron (14:00 & 02:00 UTC)
         │   Layer 3: any leftover "N/A" reuses last-known-good value from the sheet
         ▼
   sheet.append_row([date] + metrics)   → one new row, columns A–AM
+        │
+        ▼
+  build_lkg_pairs(fred) → write_helper_tab(doc)   → rewrites the `dashboard_lkg` tab
+       (NON-FATAL — a failure here never blocks the core append above)
 ```
+
+### The `dashboard_lkg` helper tab (dashboard last-resort fallback)
+
+Besides the append-only `Sheet1` time-series, each run **rewrites a second tab `dashboard_lkg`**
+— a self-describing `key,value` snapshot of the dashboard's FRED tiles consumed by the
+financial-telegram-bot dashboard as its **last-resort fallback** (read only when live FRED AND the
+dashboard's own `/tmp` last-known-good are both gone — a total outage on a cold instance).
+
+- `build_lkg_pairs(fred, updated_at)` builds `[key, value]` rows from the **rich `/api/fred` dict**
+  (not from `Sheet1`'s flat row), carrying `value` + `asOf` (+ `status`/`bullish`/`label`); **no
+  chart history**; metrics with null/`"N/A"` values are **omitted**. Keys (e.g.
+  `indicators.sentiment.value`, `checklist.m2.bullish`) are a **contract** with the dashboard
+  reader (`financial-telegram-bot/dashboard/lib/sheetLkg.js` — `parseLkgCsv`/`reconstructFred`):
+  **do not rename keys without updating that module.**
+- `write_helper_tab` does get-or-create → `clear()` → rewrite. It **never deletes** the tab, so its
+  **gid stays stable** — the dashboard reads it via a fixed `export?format=csv&gid=…` URL (the gviz
+  endpoint is NOT used: it merges the header row into the first data row and loses `updated_at`).
+- Unlike `Sheet1`, this tab is **safe to fully overwrite** each run (it's a latest-snapshot, not a
+  position-mapped append-only history). It does NOT share `Sheet1`'s column-position rules.
 
 ### The three N/A-resilience layers (the whole point of this script)
 1. **Multi-fetch merge** (`fetch_merged` + `_merge_prefer_nonnull`): each endpoint is
