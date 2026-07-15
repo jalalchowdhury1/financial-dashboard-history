@@ -168,9 +168,13 @@ spreadsheet. There are no automated tests.
   when whole else rounds to 2 dp, and returns `"N/A"` on unparseable input. Note: JOLTS &
   Initial Claims come from the API already in thousands (e.g. `6946` = 6.946M) and are
   stored as-is (the doc note about "×1000" refers to the generic K/M shorthand, not these).
-- **Latency budget (must stay < 15-min CI timeout):** `fetch_with_retry` = ≤2 tries ×30s +
-  5s backoff ≈ 65s worst; `fetch_merged` = 2 attempts + 2s gap ≈ 132s/endpoint; two fatal
-  endpoints + sheets ≈ 400s worst case. Keep retry/attempt counts in this envelope.
+- **Latency budget (must stay < 15-min CI timeout):** `fetch_with_retry` = ≤2 tries ×60s +
+  5s backoff ≈ 125s worst; `fetch_merged` = 2 attempts + 2s gap ≈ 252s/endpoint; all three
+  endpoints + sheets ≈ 13 min absolute worst case (a fatal endpoint that exhausts its
+  budget aborts the run early). Keep retry/attempt counts in this envelope. The per-request
+  timeout is 60s (raised from 30s after the 2026-07-15 failure): the Vercel endpoints run
+  under Fluid compute with no maxDuration cap, so slow-upstream days can legitimately take
+  >30s and a shorter timeout fails every retry.
 - **Sustained-outage masking:** carried-forward values are re-persisted each run, so a
   *prolonged* upstream outage (notably `copperGold` when its source is down) looks
   "frozen-but-current." Watch the run logs for repeated `carried forward` lines — the real

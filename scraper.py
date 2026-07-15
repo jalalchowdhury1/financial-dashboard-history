@@ -19,10 +19,13 @@ RETIRED_COLS = {8}
 TEXT_COLS = {38}
 
 
-def fetch_with_retry(url, max_retries=2, base_delay=5, timeout=30):
+def fetch_with_retry(url, max_retries=2, base_delay=5, timeout=60):
     """Fetch URL with exponential backoff retry logic (handles transient HTTP errors).
-    Bounded so the worst case stays well under the 15-min CI job timeout even when
-    layered under fetch_merged (see fetch_merged for the latency budget)."""
+    timeout=60 because the Vercel endpoints run under Fluid compute with no
+    maxDuration cap: on slow-upstream days a response can legitimately take >30s,
+    and a shorter client timeout fails 100% of the time regardless of retries
+    (2026-07-15 outage). Bounded so the worst case stays under the 15-min CI job
+    timeout even when layered under fetch_merged (see fetch_merged for the budget)."""
     for attempt in range(max_retries):
         try:
             resp = requests.get(url, timeout=timeout)
@@ -58,9 +61,10 @@ def fetch_merged(url, attempts=2, gap=2, fatal=True):
     values. This is the first line of defence against transient N/A: a metric that is
     momentarily null on one fetch is filled from another fetch.
 
-    Latency budget (keeps us well under the 15-min CI job timeout): each attempt is
-    fetch_with_retry (<=2 tries x 30s + 5s backoff = 65s worst); 2 attempts + gap
-    ~= 132s/endpoint; the two fatal endpoints + sheets ~= 400s worst case.
+    Latency budget (keeps us under the 15-min CI job timeout): each attempt is
+    fetch_with_retry (<=2 tries x 60s + 5s backoff = 125s worst); 2 attempts + gap
+    ~= 252s/endpoint; all three endpoints + sheets ~= 13 min absolute worst case
+    (and a fatal endpoint that exhausts its budget aborts the run early anyway).
 
     fatal=True  -> raise if EVERY attempt failed (used for the core fred/market-extra
                    feeds: better to fail the run loudly than append a junk row).
