@@ -1,9 +1,10 @@
 import os
 import re
+import math
 import json
 import time
 import traceback
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 import requests
 import gspread
 from google.oauth2.service_account import Credentials
@@ -360,6 +361,120 @@ def _is_na(v):
     return v is None or (isinstance(v, str) and v.strip().upper() in ("", "N/A"))
 
 
+# Four Horsemen history carried in the helper tab.
+#
+# Every other metric in `dashboard_lkg` is a single number, but the dashboard's
+# recession-watch card is a CHART: with fewer than two points per line its
+# `hasAnySeries` check fails and the entire card renders "N/A - Unavailable".
+# So the one path that exists to keep the dashboard alive during a total FRED
+# outage used to drop the single most decision-relevant card on it.
+#
+# Each line is therefore packed into ONE cell as `YYYY-MM-DD:value|...`, thinned
+# to stay far inside Google Sheets' 50k-character cell limit while keeping enough
+# resolution for the card's stat chips and its 12-month trend notes.
+#
+# Windows are per-cadence: claims is weekly, unemployment monthly, the spread
+# daily, bankruptcies quarterly. Reader: financial-telegram-bot
+# dashboard/lib/sheetLkg.py -> parsePackedHistory.
+HORSEMEN_HISTORY = {
+    # key -> (years to keep, max points after thinning)
+    "claims": (5, 300),          # weekly  -> ~260 points, kept whole
+    "unemployment": (10, 150),   # monthly -> ~120 points, kept whole
+    "spread": (5, 300),          # daily   -> ~1250 points, thinned to ~weekly
+    "bankruptcies": (30, 150),   # quarterly -> ~99 points, kept whole
+}
+MAX_PACKED_CHARS = 45000  # Google Sheets caps a cell at 50k
+
+
+def _thin(points, max_points):
+    """Down-sample evenly, always keeping the newest point (the current value)."""
+    if len(points) <= max_points:
+        return points
+    step = math.ceil(len(points) / max_points)
+    out = points[::step]
+    if out[-1] is not points[-1]:
+        out.append(points[-1])
+    return out
+
+
+def pack_history(history, years, max_points, now=None):
+    """Pack an ascending [{date,value}] series into `YYYY-MM-DD:value|...`.
+
+    Returns "" when there is nothing usable, so the caller can omit the key
+    entirely (same convention as every other N/A metric in this tab).
+    """
+    if not isinstance(history, list):
+        return ""
+    now = now or datetime.now(timezone.utc)
+    cutoff = (now - timedelta(days=int(years * 365.25))).strftime("%Y-%m-%d")
+
+    pts = []
+    for p in history:
+        if not isinstance(p, dict):
+            continue
+        date = p.get("date")
+        value = p.get("value")
+        if not isinstance(date, str) or len(date) != 10 or date < cutoff:
+            continue
+        if not isinstance(value, (int, float)) or isinstance(value, bool):
+            continue
+        pts.append((date, value))
+    if len(pts) < 2:
+        return ""
+
+    pts.sort(key=lambda t: t[0])
+    # Trim trailing zeros so a float like 4.2 doesn't serialize as 4.2000000001.
+    packed = "|".join(f"{d}:{round(v, 6):g}" for d, v in _thin(pts, max_points))
+    if len(packed) > MAX_PACKED_CHARS:
+        # Defensive: halve resolution until it fits rather than writing a
+        # truncated cell that would deserialize into a corrupt final point.
+        return pack_history(history, years, max_points // 2, now)
+    return packed
+
+
+def build_horsemen_pairs(fred, now=None):
+    """key->value rows for the Four Horsemen block. Never raises; a missing or
+    malformed line is simply omitted (the reader tolerates any subset)."""
+    fred = fred if isinstance(fred, dict) else {}
+    hm = fred.get("horsemen")
+    hm = hm if isinstance(hm, dict) else {}
+    yc = fred.get("yieldCurve")
+    yc = yc if isinstance(yc, dict) else {}
+
+    pairs = []
+
+    for key in ("claims", "unemployment", "bankruptcies"):
+        m = hm.get(key)
+        m = m if isinstance(m, dict) else {}
+        cur = m.get("current")
+        years, max_points = HORSEMEN_HISTORY[key]
+        packed = pack_history(m.get("history"), years, max_points, now)
+        if _is_na(cur) and not packed:
+            continue
+        if not _is_na(cur):
+            pairs.append([f"horsemen.{key}.value", cur])
+        if m.get("asOf"):
+            pairs.append([f"horsemen.{key}.asOf", m["asOf"]])
+        if packed:
+            pairs.append([f"horsemen.{key}.history", packed])
+
+    # Bankruptcies extras the stat chip reads (YoY arrow + rising/falling badge).
+    bk = hm.get("bankruptcies")
+    bk = bk if isinstance(bk, dict) else {}
+    for field in ("total", "changePct", "status"):
+        if not _is_na(bk.get(field)):
+            pairs.append([f"horsemen.bankruptcies.{field}", bk[field]])
+
+    # The spread line rides on yieldCurve (whose current/asOf are already written
+    # by build_lkg_pairs) — only its history is needed here.
+    years, max_points = HORSEMEN_HISTORY["spread"]
+    packed = pack_history(yc.get("history"), years, max_points, now)
+    if packed:
+        pairs.append(["yieldCurve.history", packed])
+
+    return pairs
+
+
 def build_lkg_pairs(fred, updated_at):
     """Self-describing key->value snapshot of the dashboard's FRED tiles, for the
     dashboard's LAST-RESORT fallback (read only when live FRED AND its /tmp
@@ -414,6 +529,13 @@ def build_lkg_pairs(fred, updated_at):
             pairs.append([f"checklist.{k}.bullish", "true" if m["bullish"] else "false"])
         if m.get("label"):
             pairs.append([f"checklist.{k}.label", m["label"]])
+
+    # Four Horsemen (values + packed chart history) — guarded so a shape change
+    # upstream can never cost us the rest of the snapshot.
+    try:
+        pairs.extend(build_horsemen_pairs(fred))
+    except Exception as e:
+        print(f"WARN: horsemen LKG pairs skipped: {e}")
 
     return pairs
 
