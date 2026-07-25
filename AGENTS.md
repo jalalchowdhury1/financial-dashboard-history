@@ -74,11 +74,27 @@ financial-telegram-bot dashboard as its **last-resort fallback** (read only when
 dashboard's own `/tmp` last-known-good are both gone — a total outage on a cold instance).
 
 - `build_lkg_pairs(fred, updated_at)` builds `[key, value]` rows from the **rich `/api/fred` dict**
-  (not from `Sheet1`'s flat row), carrying `value` + `asOf` (+ `status`/`bullish`/`label`); **no
-  chart history**; metrics with null/`"N/A"` values are **omitted**. Keys (e.g.
+  (not from `Sheet1`'s flat row), carrying `value` + `asOf` (+ `status`/`bullish`/`label`); **no chart history except the
+  Four Horsemen block below**; metrics with null/`"N/A"` values are **omitted**. Keys (e.g.
   `indicators.sentiment.value`, `checklist.m2.bullish`) are a **contract** with the dashboard
   reader (`financial-telegram-bot/dashboard/lib/sheetLkg.js` — `parseLkgCsv`/`reconstructFred`):
   **do not rename keys without updating that module.**
+- **Four Horsemen block (added 2026-07-25, `build_horsemen_pairs` + `pack_history`).** The
+  dashboard's recession-watch card is the one tile that is a **CHART**, so a value alone is
+  useless to it: with fewer than 2 history points per line its `hasAnySeries` check fails and
+  the whole card renders "N/A - Unavailable". Until this was added, the last-resort path
+  faithfully restored every card EXCEPT the single most decision-relevant one. So this block
+  is the **only** part of the tab that carries history, packed into ONE cell per line as
+  `YYYY-MM-DD:value|YYYY-MM-DD:value|…` (reader: `parsePackedHistory`). Windows are
+  per-cadence (`HORSEMEN_HISTORY`): claims 5y weekly, unemployment 10y monthly, spread 5y
+  daily thinned to ~weekly, bankruptcies 30y quarterly — largest is ~4.7KB against Google
+  Sheets' 50k-character cell limit, and `pack_history` halves resolution rather than emit a
+  truncated cell (a truncated cell would deserialize into a corrupt final point). Contract
+  keys: `horsemen.{claims,unemployment,bankruptcies}.{value,asOf,history}`,
+  `horsemen.bankruptcies.{total,changePct,status}`, and `yieldCurve.history` (the spread line
+  rides on the existing `yieldCurve.current`/`.asOf`). The whole block is wrapped in a
+  try/except inside `build_lkg_pairs`, so an upstream shape change can never cost the rest of
+  the snapshot.
 - `write_helper_tab` does get-or-create → `clear()` → rewrite. It **never deletes** the tab, so its
   **gid stays stable** — the dashboard reads it via a fixed `export?format=csv&gid=…` URL (the gviz
   endpoint is NOT used: it merges the header row into the first data row and loses `updated_at`).
