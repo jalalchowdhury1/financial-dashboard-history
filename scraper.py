@@ -544,11 +544,34 @@ def write_helper_tab(doc, pairs, title="dashboard_lkg"):
     """Get-or-create the helper worksheet, then clear + rewrite it. NEVER deletes the
     tab (its gid is referenced by the dashboard's export URL), so the gid stays stable."""
     try:
-        ws = doc.worksheet(title)
+        ws = gs_call(doc.worksheet, title)
     except gspread.WorksheetNotFound:
-        ws = doc.add_worksheet(title=title, rows=max(100, len(pairs) + 10), cols=2)
-    ws.clear()
-    ws.update(values=[["key", "value"]] + [[k, v] for k, v in pairs], range_name="A1")
+        ws = gs_call(doc.add_worksheet, title=title, rows=max(100, len(pairs) + 10), cols=2)
+    gs_call(ws.clear)
+    gs_call(ws.update, values=[["key", "value"]] + [[k, v] for k, v in pairs], range_name="A1")
+
+
+def gs_call(fn, *args, max_retries=4, base_delay=5, **kwargs):
+    """Sheets-side counterpart of fetch_with_retry: run one gspread call, retrying
+    transient Google API errors (408/429/5xx — e.g. the 2026-08-20 "[503] The service
+    is currently unavailable" that killed a run) with bounded exponential backoff.
+    Non-transient errors (403 permission, 404, bad request) raise immediately, as do
+    non-APIError exceptions. Worst case adds 5+10+20 = 35s per call site, comfortably
+    inside the 15-min CI job timeout (see the latency budget in AGENTS.md)."""
+    for attempt in range(max_retries):
+        try:
+            return fn(*args, **kwargs)
+        except gspread.exceptions.APIError as e:
+            code = getattr(e, "code", None)
+            if code is None:
+                code = getattr(getattr(e, "response", None), "status_code", None)
+            transient = code in (408, 429) or (isinstance(code, int) and code >= 500)
+            if not transient or attempt == max_retries - 1:
+                raise
+            delay = base_delay * (2 ** attempt)
+            print(f"Sheets API error {code} (attempt {attempt + 1}/{max_retries}): {e}")
+            print(f"Retrying in {delay} seconds...")
+            time.sleep(delay)
 
 
 def authenticate_gspread():
@@ -578,11 +601,11 @@ def main():
 
         gc = authenticate_gspread()
         sheet_id = "1lA-_yjLMc3qDTt9sogSPQrCohNULIk5wwJYfb5wIHfc"
-        doc = gc.open_by_key(sheet_id)
-        sheet = doc.sheet1
+        doc = gs_call(gc.open_by_key, sheet_id)
+        sheet = gs_call(lambda: doc.sheet1)  # property fetches sheet metadata
 
         # Layer 3: carry-forward backstop from the sheet's last known values.
-        all_values = sheet.get_all_values()
+        all_values = gs_call(sheet.get_all_values)
         existing_rows = all_values[1:] if len(all_values) > 1 else []
         last_known = build_last_known(existing_rows)
         metrics, carried, retired = apply_fallbacks(metrics, last_known)
@@ -598,7 +621,7 @@ def main():
         current_date = datetime.now().strftime("%Y-%m-%d")
         row = [current_date] + metrics
 
-        sheet.append_row(row)
+        gs_call(sheet.append_row, row)
         print(f"Data successfully appended to Google Sheet. "
               f"({len(metrics)} metrics; carried_forward={len(carried)}, na_remaining={na_left})")
 

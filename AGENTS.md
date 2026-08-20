@@ -141,12 +141,10 @@ python scraper.py
 ```
 Locally (when `GITHUB_ACTIONS` is unset) `authenticate_gspread()` reads a service-account
 key file named **`finance-dashboard-history-df2b4bf11659.json`** from the repo root. That
-file is **not committed** — but note **there is NO `.gitignore` in this repo** (verify:
-`git check-ignore -v finance-dashboard-history-df2b4bf11659.json` returns nothing /
-rc=1). Nothing prevents `git add .` from staging this credential, so **do NOT `git add`
-it** — and consider adding a `.gitignore` that excludes `*.json` key files. You must
-supply your own key, and the service account must have edit access to the target
-spreadsheet. There are no automated tests.
+file is **not committed** and is covered by the repo's `.gitignore` (added 2026: excludes
+`*.json`, `finance-dashboard-history-*.json`, `.env`) — still, never `git add` it
+explicitly. You must supply your own key, and the service account must have edit access
+to the target spreadsheet. There are no automated tests.
 
 ### Env vars / secrets (named only — never commit values)
 - `GITHUB_ACTIONS` — set to `"true"` by CI; selects the secret-based auth branch.
@@ -154,7 +152,8 @@ spreadsheet. There are no automated tests.
   (parsed via `json.loads` → `Credentials.from_service_account_info`). Scope:
   `https://www.googleapis.com/auth/spreadsheets`.
 - Local fallback file: `finance-dashboard-history-df2b4bf11659.json` (uncommitted secret;
-  **NOT** gitignored — the repo has no `.gitignore` — so never `git add` it).
+  gitignored via `*.json` / `finance-dashboard-history-*.json` — still never `git add` it
+  explicitly, `git add -f` would bypass the ignore).
 
 ---
 
@@ -187,10 +186,12 @@ spreadsheet. There are no automated tests.
 - **Latency budget (must stay < 15-min CI timeout):** `fetch_with_retry` = ≤2 tries ×60s +
   5s backoff ≈ 125s worst; `fetch_merged` = 2 attempts + 2s gap ≈ 252s/endpoint; all three
   endpoints + sheets ≈ 13 min absolute worst case (a fatal endpoint that exhausts its
-  budget aborts the run early). Keep retry/attempt counts in this envelope. The per-request
-  timeout is 60s (raised from 30s after the 2026-07-15 failure): the Vercel endpoints run
-  under Fluid compute with no maxDuration cap, so slow-upstream days can legitimately take
-  >30s and a shorter timeout fails every retry.
+  budget aborts the run early). `gs_call` (Sheets-side retry, added after the 2026-08-20
+  transient 503 failure) = ≤4 tries with 5/10/20s backoff ≈ +35s worst per Sheets call —
+  only reached when the Sheets API itself is erroring. Keep retry/attempt counts in this
+  envelope. The per-request timeout is 60s (raised from 30s after the 2026-07-15 failure):
+  the Vercel endpoints run under Fluid compute with no maxDuration cap, so slow-upstream
+  days can legitimately take >30s and a shorter timeout fails every retry.
 - **Sustained-outage masking:** carried-forward values are re-persisted each run, so a
   *prolonged* upstream outage (notably `copperGold` when its source is down) looks
   "frozen-but-current." Watch the run logs for repeated `carried forward` lines — the real
@@ -201,9 +202,9 @@ spreadsheet. There are no automated tests.
   wraps each metric extraction in try/except. Keep that defensiveness.
 - **Public repo — no secrets in code.** Initial commit history note: the repo was "cleaned
   of secrets." Keep credentials in `GOOGLE_SHEETS_CREDS` (CI) or the local
-  `finance-dashboard-history-df2b4bf11659.json` only. **The repo has NO `.gitignore`**, so
-  that local JSON is *not* protected from staging — never `git add` it, and prefer adding a
-  `.gitignore` (e.g. `*.json`, `*-df2b4bf11659.json`) to make the protection real.
+  `finance-dashboard-history-df2b4bf11659.json` only. The `.gitignore` excludes `*.json` /
+  `finance-dashboard-history-*.json` / `.env`, so the key can't be staged accidentally —
+  still never `git add -f` it.
 
 ---
 
@@ -257,6 +258,8 @@ The deleted docs were planning/QA artifacts and drifted from the shipped code. C
   - `extract_metrics` — builds the ordered 38-metric list (the column contract).
   - `build_last_known` / `apply_fallbacks` — Layer 3 carry-forward + retired-column
     blanking; `RETIRED_COLS = {8}` (LEI), `TEXT_COLS = {38}` (VIX Fear/Greed).
+  - `gs_call` — bounded retry wrapper for every gspread call (transient 408/429/5xx
+    only; added after a transient Sheets 503 killed the 2026-08-20 02:49 UTC run).
   - `authenticate_gspread` — env-aware auth (CI secret vs local JSON file).
   - `main` — orchestrates the layers, appends the row, re-raises on any error.
 - `requirements.txt` — `gspread`, `google-auth`, `requests`.
