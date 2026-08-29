@@ -83,6 +83,13 @@ fixed twice-daily cadence that financial-telegram-bot's fresh-print marks
 - **`current_slot_window(now)`** buckets `now` into the current ~12h slot: anchors at
   02:00/14:00 UTC, boundaries at the midpoints 08:00/20:00 UTC (so a trigger firing a
   little early/late still lands in the same bucket as the "official" cron run).
+  **Known bounded behavior — a >6h-late run crosses the midpoint into the NEXT slot's
+  window** (measured: GitHub fired every run 6–11h late through 2026-08-29, e.g. the
+  02:00 cron at 08:26). It then appends there, and that slot's on-time trigger skips.
+  Net effect is one *mistimed* row, never a duplicate and never a hole — acceptable for
+  a diff-consecutive-rows consumer, so this is documented rather than engineered away.
+  With AWS EventBridge as the on-time primary (One Clock, 30 min ahead of each cron),
+  the case only arises when AWS misses AND GitHub is >6h late on the same slot.
 - **`already_ran_this_slot()`** asks the GitHub REST API whether a prior run of this
   workflow already **succeeded** inside the current slot window, ignoring its own run id.
   **Why GitHub run-history and not the sheet's own latest row** (the normally-preferred,
