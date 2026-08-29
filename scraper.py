@@ -574,6 +574,117 @@ def gs_call(fn, *args, max_retries=4, base_delay=5, **kwargs):
             time.sleep(delay)
 
 
+def current_slot_window(now=None):
+    """Return (window_start, window_end, label) for the ~12h scrape slot `now` falls
+    in. Slots are anchored at the two cron times (02:00 and 14:00 UTC); the boundary
+    between them sits at the midpoint (08:00 and 20:00 UTC) so a run firing a little
+    early/late (cron jitter, or an EventBridge dispatch landing near-but-not-exactly
+    on the minute) still lands in the same bucket as the "official" run for that slot.
+    This window IS the de-dupe unit ("did the 02:00 or 14:00 slot already run"), not
+    the calendar day -- two rows sharing today's date is the NORMAL, correct outcome
+    (one per slot); it's two rows in the SAME slot that would be the bug."""
+    now = now or datetime.now(timezone.utc)
+    hour = now.hour
+    if hour < 8:
+        end = now.replace(hour=8, minute=0, second=0, microsecond=0)
+        start = end - timedelta(hours=12)
+        label = f"{now.date().isoformat()}-AM"
+    elif hour < 20:
+        start = now.replace(hour=8, minute=0, second=0, microsecond=0)
+        end = now.replace(hour=20, minute=0, second=0, microsecond=0)
+        label = f"{now.date().isoformat()}-PM"
+    else:
+        start = now.replace(hour=20, minute=0, second=0, microsecond=0)
+        end = start + timedelta(hours=12)
+        label = f"{(now.date() + timedelta(days=1)).isoformat()}-AM"
+    return start, end, label
+
+
+def _github_api_get(url, params, headers, attempts=2, timeout=15):
+    """Small retry wrapper (mirrors fetch_with_retry's shape) for the one dedupe-guard
+    call to the GitHub REST API. Only smooths over a transient network blip -- if both
+    attempts fail the exception propagates (see already_ran_this_slot's docstring for
+    why that's deliberate)."""
+    last_err = None
+    for i in range(attempts):
+        try:
+            resp = requests.get(url, params=params, headers=headers, timeout=timeout)
+            resp.raise_for_status()
+            return resp.json()
+        except requests.exceptions.RequestException as e:
+            last_err = e
+            if i < attempts - 1:
+                time.sleep(3)
+    raise RuntimeError(f"GitHub API request failed after {attempts} attempts: {last_err}")
+
+
+def already_ran_this_slot(now=None):
+    """Dedupe guard: has a successful run of THIS workflow already completed inside
+    the current ~12h scrape slot (see current_slot_window)?
+
+    WHY GITHUB RUN-HISTORY AND NOT THE SHEET: the truest "did this slot already run"
+    signal would be the sheet's own latest row, but Sheet1's date column (A) is
+    date-only ("YYYY-MM-DD", written by datetime.now().strftime -- see main()) with no
+    time component, and this scraper legitimately runs TWICE on the same calendar date
+    (02:00 and 14:00 UTC), so both slots already write the identical date string. Reading
+    the sheet can't tell those two slots apart without adding a new timestamp column to
+    Sheet1 -- and Sheet1's columns are read by fixed position from financial-telegram-bot
+    (dashboard/app/api/history/route.js fetches the whole CSV; dashboard/lib/marks.js
+    SHEET_METRICS indexes it by a hardcoded 1-based column number per metric), so a schema
+    change here is a riskier, cross-repo change than this guard needs. So this uses the
+    fallback AGENTS.md calls out: GitHub's own run history for this workflow, which needs
+    no schema change and no new secret (GITHUB_TOKEN is already minted per-run).
+
+    WHY A GUARD ERROR RAISES INSTEAD OF FAILING OPEN OR CLOSED: this endpoint's history
+    is append-only and feeds cadence-sensitive downstream logic (fresh-print marks
+    diff consecutive rows; dashboard_lkg is a last-resort fallback) -- a SILENT duplicate
+    row corrupts that cadence in a way nothing currently detects, which is worse than a
+    visibly-failed (red) CI run Jalal can just re-dispatch. Silently skipping instead
+    would be just as bad in the other direction: it would look identical to "this slot
+    correctly already ran," masking a real GitHub-API problem behind a green check. So
+    when this can't be determined, it does neither silently -- it raises, main()'s
+    existing critical-error handling prints the traceback and re-raises, and NOTHING is
+    appended. This matches the rest of the file's own convention (fetch_merged: "better
+    to fail the run loudly than append a junk row").
+    """
+    repo = os.environ["GITHUB_REPOSITORY"]
+    this_run_id = os.environ["GITHUB_RUN_ID"]
+    token = os.environ["GH_GUARD_TOKEN"]
+    api_base = os.environ.get("GITHUB_API_URL", "https://api.github.com")
+    start, end, label = current_slot_window(now)
+
+    url = f"{api_base}/repos/{repo}/actions/workflows/scraper.yml/runs"
+    params = {
+        "status": "success",
+        "created": f">={start.strftime('%Y-%m-%dT%H:%M:%SZ')}",
+        "per_page": 20,
+    }
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+    data = _github_api_get(url, params, headers)
+
+    for run in data.get("workflow_runs", []):
+        if str(run.get("id")) == str(this_run_id):
+            continue  # never compare a run against itself
+        created = run.get("created_at")
+        if not created:
+            continue
+        try:
+            created_dt = datetime.strptime(created, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+        except ValueError:
+            continue
+        if start <= created_dt < end:
+            print(f"INFO: dedupe guard: slot {label} already has a successful run "
+                  f"(run {run.get('id')}, created {created}) -- skipping this run.")
+            return True
+
+    print(f"INFO: dedupe guard: no prior successful run found in slot {label}; proceeding.")
+    return False
+
+
 def authenticate_gspread():
     scopes = ["https://www.googleapis.com/auth/spreadsheets"]
     if os.getenv("GITHUB_ACTIONS"):
@@ -591,6 +702,20 @@ def authenticate_gspread():
 
 def main():
     try:
+        if os.getenv("GITHUB_ACTIONS"):
+            # One Clock: this workflow can now also be triggered by AWS EventBridge
+            # via workflow_dispatch, alongside the existing cron. Skip the dedupe
+            # guard only for a HUMAN manually re-running it (workflow_dispatch's
+            # `force` input, unset/false by default -- EventBridge never sets it, same
+            # as keepalive.yml's existing `force` input in this repo).
+            if os.getenv("SCRAPER_FORCE", "").strip().lower() == "true":
+                print("INFO: SCRAPER_FORCE=true (manual override) -- skipping the dedupe guard.")
+            elif already_ran_this_slot():
+                print("INFO: dedupe guard: this scrape slot already completed "
+                      "successfully elsewhere; skipping the fetch/append to avoid "
+                      "a duplicate row.")
+                return
+
         # Layer 1: multi-fetch + merge (transient-null recovery happens inside).
         fred = get_fred_data()
         market_extra = get_market_extra_data()

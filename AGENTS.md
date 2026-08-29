@@ -32,7 +32,9 @@ A scheduled **GitHub Action** runs `python scraper.py`. The script:
   14:00 UTC = 10:00 ET and 02:00 UTC = 22:00 ET. During **EST** (UTC-5, ~Nov–Mar) the
   cron is fixed UTC so it actually fires at **9 AM / 9 PM ET**. (As of 2026-06-08, EDT is
   in effect, so the run is at 10 AM / 10 PM ET.) Also runnable on demand via
-  `workflow_dispatch`.
+  `workflow_dispatch`, and — as of 2026-08-29, part of the "One Clock" project — by AWS
+  EventBridge dispatching that same `workflow_dispatch` event on its own schedule. See
+  the dedupe guard below for why a second trigger landing in the same window is safe.
 - **Output sheet:** spreadsheet id `1lA-_yjLMc3qDTt9sogSPQrCohNULIk5wwJYfb5wIHfc`, first
   tab (`doc.sheet1`, i.e. `Sheet1`). Row 1 is a header row; data rows start at row 2.
 - **No README, no app, no deploy target of its own.** It just writes to the sheet.
@@ -65,6 +67,57 @@ GitHub Actions cron (14:00 & 02:00 UTC)
   build_lkg_pairs(fred) → write_helper_tab(doc)   → rewrites the `dashboard_lkg` tab
        (NON-FATAL — a failure here never blocks the core append above)
 ```
+
+Before Layer 1, in CI only, a **dedupe guard** (`already_ran_this_slot`) can short-circuit
+`main()` and return without fetching/appending anything at all — see below.
+
+### Dedupe guard (added 2026-08-29, "One Clock")
+
+The workflow now has two triggers that both dispatch it: the cron above, and AWS
+EventBridge (which also calls `workflow_dispatch`, on its own independent schedule).
+Nothing stops the two from landing within the same ~12h scrape slot, which — with no
+guard — would **append two rows for the same slot**, corrupting the append-only history's
+fixed twice-daily cadence that financial-telegram-bot's fresh-print marks
+(`dashboard/lib/marks.js SHEET_METRICS`) depend on to decide what counts as "news."
+
+- **`current_slot_window(now)`** buckets `now` into the current ~12h slot: anchors at
+  02:00/14:00 UTC, boundaries at the midpoints 08:00/20:00 UTC (so a trigger firing a
+  little early/late still lands in the same bucket as the "official" cron run).
+- **`already_ran_this_slot()`** asks the GitHub REST API whether a prior run of this
+  workflow already **succeeded** inside the current slot window, ignoring its own run id.
+  **Why GitHub run-history and not the sheet's own latest row** (the normally-preferred,
+  no-new-infrastructure signal): column A is `datetime.now().strftime("%Y-%m-%d")` —
+  **date-only, no time** — and this scraper legitimately runs twice on the same calendar
+  date, so both slots already write the identical date string; telling them apart needs a
+  time component the sheet doesn't carry, and adding one would touch a schema
+  financial-telegram-bot reads by fixed column position (`SHEET_METRICS`, `/api/history`)
+  — a riskier, cross-repo change than this guard warrants. Run-history needs no schema
+  change and no new secret (`GITHUB_TOKEN` is already minted per run); it's wired via the
+  job's `actions: read` permission + `secrets.GITHUB_TOKEN` passed in as `GH_GUARD_TOKEN`.
+- **Failure mode: neither fail-open nor fail-closed — fail LOUD.** If the GitHub API call
+  errors (after one retry), `already_ran_this_slot` **raises**, and `main()`'s existing
+  critical-error handling prints the traceback and re-raises, so **nothing is appended**
+  and the run goes red. This was a deliberate choice, not the default: silently proceeding
+  to scrape/append risks the exact duplicate-row corruption this guard exists to prevent
+  (worse here than elsewhere, because it's append-only and cadence-sensitive); silently
+  skipping would look identical to "this slot correctly already ran," hiding a real
+  GitHub-API problem behind a green check — this repo's own convention (`fetch_merged`)
+  is "fail loudly rather than write something wrong," and a visibly-red run is something
+  Jalal can just re-dispatch. See the docstring in `scraper.py` for the full reasoning.
+- **Manual override:** `workflow_dispatch` gained a `force` boolean input (default
+  `false`, mirrors `keepalive.yml`'s existing `force` input) that skips the guard entirely
+  — for a human re-testing the scraper on demand. EventBridge's dispatch never sets it, so
+  it always gets the guarded path.
+- **`concurrency: {group: automated-data-pipeline, cancel-in-progress: false}`** on the
+  workflow queues an overlapping trigger instead of racing it — the guard can only see
+  runs that have already *finished*, so two triggers landing at the same instant would
+  otherwise both pass the check before either had appended (this exact race pattern
+  already double-sent a message in a sibling project). Queuing means the second run's
+  guard check runs strictly after the first completes.
+- A useful side effect: if the first run in a slot genuinely **fails** (not just gets
+  deduped), `already_ran_this_slot` finds no `status=success` run in the window, so a
+  second trigger (EventBridge or manual) in the same slot will actually retry the scrape
+  rather than skip it.
 
 ### The `dashboard_lkg` helper tab (dashboard last-resort fallback)
 
@@ -144,7 +197,12 @@ key file named **`finance-dashboard-history-df2b4bf11659.json`** from the repo r
 file is **not committed** and is covered by the repo's `.gitignore` (added 2026: excludes
 `*.json`, `finance-dashboard-history-*.json`, `.env`) — still, never `git add` it
 explicitly. You must supply your own key, and the service account must have edit access
-to the target spreadsheet. There are no automated tests.
+to the target spreadsheet.
+
+**Tests:** `pip install pytest && python -m pytest tests/` — pure-function unit tests for
+`build_lkg_pairs`/`pack_history` (`tests/test_lkg.py`) and the dedupe guard
+(`tests/test_dedupe_guard.py`, added 2026-08-29). Not wired into CI (no test workflow
+exists yet); run manually before pushing a change to `scraper.py`.
 
 ### Env vars / secrets (named only — never commit values)
 - `GITHUB_ACTIONS` — set to `"true"` by CI; selects the secret-based auth branch.
@@ -240,8 +298,9 @@ The deleted docs were planning/QA artifacts and drifted from the shipped code. C
   hour across daylight-saving transitions. Acceptable; just be aware the comment
   ("10 AM/10 PM ET") is exact only during **EDT** (UTC-4); during **EST** (UTC-5) the run
   actually lands at **9 AM/9 PM ET**.
-- **No tests / no monitoring of its own.** A failed run is visible only as a red Actions
-  run (no alert). If silent-failure detection is wanted, that is unbuilt work.
+- **No monitoring of its own.** A failed (or correctly-deduped) run is visible only as a
+  red/green Actions run — no alert. If silent-failure detection is wanted, that is unbuilt
+  work. (There ARE unit tests, `tests/` — not run in CI, see §3.)
 
 ---
 
@@ -260,11 +319,19 @@ The deleted docs were planning/QA artifacts and drifted from the shipped code. C
     blanking; `RETIRED_COLS = {8}` (LEI), `TEXT_COLS = {38}` (VIX Fear/Greed).
   - `gs_call` — bounded retry wrapper for every gspread call (transient 408/429/5xx
     only; added after a transient Sheets 503 killed the 2026-08-20 02:49 UTC run).
+  - `current_slot_window` / `already_ran_this_slot` / `_github_api_get` — the dedupe
+    guard (added 2026-08-29, see "Dedupe guard" above); CI-only, gated in `main()`.
   - `authenticate_gspread` — env-aware auth (CI secret vs local JSON file).
-  - `main` — orchestrates the layers, appends the row, re-raises on any error.
+  - `main` — runs the dedupe guard (CI only), orchestrates the layers, appends the row,
+    re-raises on any error (including a guard error — see "Dedupe guard" above).
 - `requirements.txt` — `gspread`, `google-auth`, `requests`.
+- `tests/test_dedupe_guard.py` — unit tests for the dedupe guard (added 2026-08-29).
 - `.github/workflows/scraper.yml` — the twice-daily cron pipeline ("Automated Data
-  Pipeline"), `cron: 0 14,2 * * *`, 15-min timeout, secret `GOOGLE_SHEETS_CREDS`.
+  Pipeline"), `cron: 0 14,2 * * *` **+ `workflow_dispatch`** (manual, and — as of
+  2026-08-29 — AWS EventBridge), 15-min timeout, secret `GOOGLE_SHEETS_CREDS`.
+  `concurrency: {group: automated-data-pipeline, cancel-in-progress: false}` queues
+  overlapping triggers; `workflow_dispatch.inputs.force` bypasses the dedupe guard for
+  manual testing.
 - `.github/workflows/keepalive.yml` — empty-commit keepalive (≥40-day idle guard) so the
   cron isn't auto-disabled; the only workflow that pushes to this repo.
 

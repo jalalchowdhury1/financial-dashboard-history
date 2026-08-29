@@ -5,6 +5,27 @@ on:
     # Runs at 10:00 AM and 10:00 PM Eastern Time
     - cron: '0 14,2 * * *'
   workflow_dispatch: # Allows manual triggering
+    inputs:
+      force:
+        description: 'Skip the dedupe guard and scrape/append even if this slot already ran (manual testing only)'
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  actions: read # dedupe guard lists this workflow's run history (scraper.py: already_ran_this_slot)
+
+# One Clock adds a second trigger (AWS EventBridge -> workflow_dispatch) alongside the
+# cron above. `cancel-in-progress: false` QUEUES an overlapping trigger instead of
+# racing it: the in-sheet/run-history dedupe guard in scraper.py can only see runs that
+# have already finished, so two triggers landing at the same instant would otherwise
+# both pass the guard before either had appended a row (this exact race already
+# double-sent a message in a sibling project). Queuing means the second run's guard
+# check runs AFTER the first has completed, so it correctly sees the first run and
+# skips.
+concurrency:
+  group: automated-data-pipeline
+  cancel-in-progress: false
 
 jobs:
   run-pipeline:
@@ -30,4 +51,6 @@ jobs:
         env:
           GITHUB_ACTIONS: "true"
           GOOGLE_SHEETS_CREDS: ${{ secrets.GOOGLE_SHEETS_CREDS }}
+          GH_GUARD_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SCRAPER_FORCE: ${{ inputs.force }}
         run: python scraper.py
